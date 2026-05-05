@@ -1,10 +1,10 @@
-# ============ RMI-style Implementation for Google Colab ============
+# ============ RMI-style Implementation for Google Colab (Fixed) ============
 
 import socket
 import json
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+import sys
 
 # ============ Remote Interface ============
 class AddInterface:
@@ -18,20 +18,23 @@ class Add(AddInterface):
 
 # ============ Server ============
 class AddServer:
-    def __init__(self):
+    def __init__(self, port=9090):
         self.obj = Add()
         self.server_socket = None
         self.running = False
+        self.port = port
     
     def start(self):
         try:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.server_socket.bind(("", 9090))  # Bind to all interfaces in Colab
+            # Allow reusing the address
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.bind(("", self.port))
             self.server_socket.listen(1)
-            self.server_socket.settimeout(1)  # 1 second timeout for checking running flag
+            self.server_socket.settimeout(1)
             self.running = True
             
-            print("Server is connected and waiting for the client...")
+            print(f"Server is connected and waiting for the client on port {self.port}...")
             
             while self.running:
                 try:
@@ -44,8 +47,14 @@ class AddServer:
                         print(f"Server error: {e}")
                     break
                     
+        except OSError as e:
+            if e.errno == 98:  # Address already in use
+                print(f"Server could not connect: Port {self.port} is already in use")
+                print("Try stopping previous server or using a different port")
+            else:
+                print(f"Server could not connect: {e}")
         except Exception as e:
-            print("Server could not connect:", e)
+            print(f"Server could not connect: {e}")
     
     def handle_client(self, client_socket):
         try:
@@ -69,18 +78,18 @@ class AddServer:
 
 # ============ Client ============
 class AddClient:
+    def __init__(self, port=9090):
+        self.port = port
+    
     def sum_remote(self, n1, n2):
         try:
-            # Create socket and connect to server
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             client_socket.settimeout(5)
-            client_socket.connect(("localhost", 9090))
+            client_socket.connect(("localhost", self.port))
             
-            # Prepare and send request
             request = {"method": "sum", "n1": n1, "n2": n2}
             client_socket.send(json.dumps(request).encode())
             
-            # Receive and parse response
             response = json.loads(client_socket.recv(1024).decode())
             client_socket.close()
             
@@ -96,23 +105,45 @@ class AddClient:
             print(f"Client Exception: {e}")
             return None
 
-# ============ Main Execution in Colab ============
+# ============ Main Execution ============
 
-# Method 1: Run server in background thread
+# Try different ports if 9090 is busy
+def find_available_port(start_port=9090):
+    for port in range(start_port, start_port + 10):
+        try:
+            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            test_socket.bind(("localhost", port))
+            test_socket.close()
+            return port
+        except OSError:
+            continue
+    return start_port
+
 print("=" * 50)
 print("RMI-style Remote Method Invocation in Colab")
 print("=" * 50)
 
+# Find an available port
+available_port = find_available_port(9090)
+print(f"Using port: {available_port}")
+
+# Stop any existing server threads (if any)
+for thread in threading.enumerate():
+    if thread.name == "ServerThread":
+        print("Stopping existing server...")
+        # Can't forcefully stop threads, will use different port
+
 # Start the server in a background thread
-server = AddServer()
-server_thread = threading.Thread(target=server.start, daemon=True)
+server = AddServer(port=available_port)
+server_thread = threading.Thread(target=server.start, daemon=True, name="ServerThread")
 server_thread.start()
 
 # Wait for server to start
 time.sleep(2)
 
 # Create client and make remote calls
-client = AddClient()
+client = AddClient(port=available_port)
 
 print("\nMaking remote method calls...")
 print("-" * 40)
@@ -134,6 +165,3 @@ print("-" * 40)
 print("\nServer is connected and waiting for the client... (running in background)")
 print("Client successfully made remote calls to the server!")
 print("\n✨ RMI simulation completed successfully!")
-
-# Optional: Stop the server (uncomment if needed)
-# server.stop()
